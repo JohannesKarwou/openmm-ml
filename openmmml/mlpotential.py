@@ -295,41 +295,76 @@ class MLPotential(object):
 
             for force in system.getForces():
                 if isinstance(force, openmm.NonbondedForce):
-                    internalNonbonded = openmm.CustomBondForce('138.935456*chargeProd/r + 4*epsilon*((sigma/r)^12-(sigma/r)^6)')
-                    internalNonbonded.addPerBondParameter('chargeProd')
-                    internalNonbonded.addPerBondParameter('sigma')
-                    internalNonbonded.addPerBondParameter('epsilon')
-                    numParticles = system.getNumParticles()
-                    atomCharge = [0]*numParticles
-                    atomSigma = [0]*numParticles
-                    atomEpsilon = [0]*numParticles
-                    for i in range(numParticles):
-                        charge, sigma, epsilon = force.getParticleParameters(i)
-                        atomCharge[i] = charge
-                        atomSigma[i] = sigma
-                        atomEpsilon[i] = epsilon
-                    exceptions = {}
-                    for i in range(force.getNumExceptions()):
-                        p1, p2, chargeProd, sigma, epsilon = force.getExceptionParameters(i)
-                        exceptions[(p1, p2)] = (chargeProd, sigma, epsilon)
-                    for p1 in atomList:
-                        for p2 in atomList:
-                            if p1 == p2:
-                                break
-                            if (p1, p2) in exceptions:
-                                chargeProd, sigma, epsilon = exceptions[(p1, p2)]
-                            elif (p2, p1) in exceptions:
-                                chargeProd, sigma, epsilon = exceptions[(p2, p1)]
-                            else:
-                                chargeProd = atomCharge[p1]*atomCharge[p2]
-                                sigma = 0.5*(atomSigma[p1]+atomSigma[p2])
-                                epsilon = unit.sqrt(atomEpsilon[p1]*atomEpsilon[p2])
-                            if chargeProd._value != 0 or epsilon._value != 0:
-                                internalNonbonded.addBond(p1, p2, [chargeProd, sigma, epsilon])
-                    if internalNonbonded.getNumBonds() > 0:
-                        name = f'mmForce{len(mmVarNames)+1}'
-                        cv.addCollectiveVariable(name, internalNonbonded)
-                        mmVarNames.append(name)
+                    if topology.getNumAtoms() == len(atomList):
+                        eps_solvent = force.getReactionFieldDielectric()
+                        cutoff = force.getCutoffDistance()
+                        krf = (1/ (cutoff**3)) * (eps_solvent - 1) / (2*eps_solvent + 1)
+                        crf = (1/ cutoff) * (3* eps_solvent) / (2*eps_solvent + 1)
+                        ONE_4PI_EPS0 = 138.935456
+                        energy_expression  = "4*epsilon*((sigma/r)^12 - (sigma/r)^6) + ONE_4PI_EPS0*chargeprod*(1/r + krf*r*r - crf);"
+                        energy_expression += "krf = {:f};".format(krf.value_in_unit(unit.nanometer**-3))
+                        energy_expression += "crf = {:f};".format(crf.value_in_unit(unit.nanometer**-1))
+                        energy_expression += "epsilon = sqrt(epsilon1*epsilon2);"
+                        energy_expression += "sigma = 0.5*(sigma1+sigma2);"
+                        energy_expression += "chargeprod = charge1*charge2;"
+                        energy_expression += "ONE_4PI_EPS0 = {:f};".format(ONE_4PI_EPS0)
+
+                        custom_nonbonded_force = openmm.CustomNonbondedForce(energy_expression)
+                        custom_nonbonded_force.addPerParticleParameter('charge')
+                        custom_nonbonded_force.addPerParticleParameter('sigma')
+                        custom_nonbonded_force.addPerParticleParameter('epsilon')
+                        custom_nonbonded_force.setNonbondedMethod(openmm.CustomNonbondedForce.CutoffPeriodic)
+                        custom_nonbonded_force.setCutoffDistance(cutoff)
+
+                        for index in range(force.getNumParticles()):
+                            charge, sigma, epsilon = force.getParticleParameters(index)
+                            custom_nonbonded_force.addParticle([charge, sigma, epsilon])
+                        for index in range(force.getNumExceptions()):
+                            j, k, chargeprod, sigma, epsilon = force.getExceptionParameters(index)
+                            custom_nonbonded_force.addExclusion(j, k)
+                    
+                        custom_nonbonded_force.setUseLongRangeCorrection(False)
+                        if custom_nonbonded_force.getNumParticles() > 0:
+                            name = f'mmForce{len(mmVarNames)+1}'
+                            cv.addCollectiveVariable(name, custom_nonbonded_force)
+                            mmVarNames.append(name)
+
+                    else:
+                        internalNonbonded = openmm.CustomBondForce('138.935456*chargeProd/r + 4*epsilon*((sigma/r)^12-(sigma/r)^6)')
+                        internalNonbonded.addPerBondParameter('chargeProd')
+                        internalNonbonded.addPerBondParameter('sigma')
+                        internalNonbonded.addPerBondParameter('epsilon')
+                        numParticles = system.getNumParticles()
+                        atomCharge = [0]*numParticles
+                        atomSigma = [0]*numParticles
+                        atomEpsilon = [0]*numParticles
+                        for i in range(numParticles):
+                            charge, sigma, epsilon = force.getParticleParameters(i)
+                            atomCharge[i] = charge
+                            atomSigma[i] = sigma
+                            atomEpsilon[i] = epsilon
+                        exceptions = {}
+                        for i in range(force.getNumExceptions()):
+                            p1, p2, chargeProd, sigma, epsilon = force.getExceptionParameters(i)
+                            exceptions[(p1, p2)] = (chargeProd, sigma, epsilon)
+                        for p1 in atomList:
+                            for p2 in atomList:
+                                if p1 == p2:
+                                    break
+                                if (p1, p2) in exceptions:
+                                    chargeProd, sigma, epsilon = exceptions[(p1, p2)]
+                                elif (p2, p1) in exceptions:
+                                    chargeProd, sigma, epsilon = exceptions[(p2, p1)]
+                                else:
+                                    chargeProd = atomCharge[p1]*atomCharge[p2]
+                                    sigma = 0.5*(atomSigma[p1]+atomSigma[p2])
+                                    epsilon = unit.sqrt(atomEpsilon[p1]*atomEpsilon[p2])
+                                if chargeProd._value != 0 or epsilon._value != 0:
+                                    internalNonbonded.addBond(p1, p2, [chargeProd, sigma, epsilon])
+                        if internalNonbonded.getNumBonds() > 0:
+                            name = f'mmForce{len(mmVarNames)+1}'
+                            cv.addCollectiveVariable(name, internalNonbonded)
+                            mmVarNames.append(name)
 
             # Configure the CustomCVForce so lambda_interpolate interpolates between the conventional and ML potentials.
 
