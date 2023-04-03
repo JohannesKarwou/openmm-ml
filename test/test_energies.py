@@ -100,6 +100,7 @@ def test_creating_mm_system_charmm():
             mm_nonbonded_energy = energy
             assert np.isclose(mm_nonbonded_energy, -1142.246)
 
+    logger.info(f"The nonbonded MM energy is: {mm_nonbonded_energy}")
     return mm_nonbonded_energy
 
 
